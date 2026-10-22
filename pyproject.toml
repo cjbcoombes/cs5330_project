@@ -1,0 +1,22 @@
+[project]
+name = "hmer-latex"
+version = "0.1.0"
+description = "Add your description here"
+authors = [
+    { name = "Christopher Coombes", email = "cjbcoombes@gmail.com" },
+    { name = "Lon Pierson", email = "pierson.l@northeastern.edu" }
+]
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=2.4.6",
+    "pillow>=13.0.0",
+    "pyyaml>=6.0.3",
+    "requests>=2.34.2",
+    "tensorboard>=2.21.0",
+    "torch>=2.14.1",
+    "tqdm>=4.70.1",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.19,<0.13.0"]
+build-backend = "uv_build"

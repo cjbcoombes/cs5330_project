@@ -1,0 +1,38 @@
+# Dataset source manifest, consumed by scripts/download_data.py.
+#
+# NOTE: CROHME and HME100K are not hosted at stable, scriptable URLs we can
+# bake in sight-unseen (CROHME is spread across several competition-year
+# mirrors, and HME100K is distributed via a Google Drive / Baidu link from
+# the SAN paper repo, which usually requires a manual click-through). Fill
+# in the real URLs here once we've found/confirmed them, then run:
+#
+#   uv run python scripts/download_data.py crohme
+#   uv run python scripts/download_data.py hme100k
+#
+# If a dataset can't be fetched via direct URL (e.g. Google Drive), download
+# it manually into data/raw/<name>/ and skip the `url` field for that entry;
+# the script will just verify + extract what's already there.
+
+crohme:
+  description: >
+    CROHME InkML stroke data (2014/2016/2019/2023 competition sets).
+    Official competition page: https://crohme2023.ltu-ai.dev/ (check for
+    current data links; older years mirrored at isical.ac.in/~crohme and
+    in various GitHub repos, e.g. Hong-Teng or ThomasLech CROHME mirrors).
+  archives:
+    - name: crohme_2019
+      url: null # TODO: fill in before downloading
+      sha256: null
+    - name: crohme_2023
+      url: null # TODO: fill in before downloading
+      sha256: null
+
+hme100k:
+  description: >
+    HME100K camera-captured handwritten math images (Yuan et al., SAN,
+    CVPR 2022). Distributed from the SAN paper repo:
+    https://github.com/tal-tech/SAN (check README for current link).
+  archives:
+    - name: hme100k
+      url: null # TODO: fill in before downloading
+      sha256: null

@@ -1,0 +1,24 @@
+# Baseline CROHME training config. Copy this for each experiment variant
+# (e.g. configs/hme100k_finetune.yaml, configs/aug_perspective.yaml).
+
+data:
+  train_dir: data/processed/crohme_train
+  val_dir: data/processed/crohme_val
+  vocab_path: data/processed/vocab.json
+  image_size: [256, 256]
+  batch_size: 16
+  num_workers: 4
+
+model:
+  d_model: 256
+  nhead: 8
+  num_decoder_layers: 3
+
+train:
+  epochs: 50
+  lr: 0.0001
+  weight_decay: 0.0001
+  device: auto
+  checkpoint_dir: checkpoints
+  log_dir: runs
+  run_name: baseline
