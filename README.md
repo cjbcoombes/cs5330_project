@@ -40,6 +40,22 @@ runs/                 TensorBoard logs (gitignored)
 notebooks/            exploration: InkML renders, attention visualization, result plots
 ```
 
+## External tools (not vendored yet)
+
+CROHME's own toolkit, referenced by the competition data pages, may be
+useful once we're rendering/evaluating InkML:
+
+- [crohmelib](https://gitlab.univ-nantes.fr/crohme/crohmelib) -- reference
+  InkML <-> image renderer and LG/InkML converters, plus `evalInkml` for
+  the official structural metrics (STRUCT, REL-1/2/3). Candidate for our
+  InkML rendering pipeline instead of writing one from scratch.
+- [lgEval](https://gitlab.com/dprl/lgeval) -- label-graph evaluation
+  library for symbol/structure-level scoring. Useful later for structural
+  error analysis beyond LaTeX string accuracy; not needed for a first pass.
+
+Not added as submodules yet -- pull in when we get to the rendering/eval
+pipeline.
+
 ## Status
 
 Scaffolding only -- most modules are stubs (`NotImplementedError`) marking
@@ -48,8 +64,10 @@ end. Data has not been downloaded.
 
 ## Next steps
 
-1. Find and confirm real download URLs for CROHME + HME100K, fill into
-   `configs/datasets.yaml`.
+1. ~~Find and confirm real download URLs for CROHME + HME100K.~~ Done --
+   see `configs/datasets.yaml` (CROHME 2023 from Zenodo, CROHME 2016 +
+   HME100K from the figshare bundle). Not downloaded yet; run
+   `scripts/download_data.py` when ready.
 2. Implement `data/render_inkml.py` against a real sample `.inkml` file.
 3. Implement `DenseNetEncoder` and `TransformerDecoder`, get a tiny subset
    overfitting end to end as a sanity check.
