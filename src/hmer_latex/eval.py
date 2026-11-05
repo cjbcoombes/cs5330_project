@@ -2,7 +2,7 @@
 report ExpRate (exact-match accuracy) and symbol-level error rate.
 
 Usage:
-    uv run python -m hmer_latex.eval --config configs/base.yaml --checkpoint checkpoints/baseline/best.pt --data-dir data/processed/crohme_test
+    uv run python -m hmer_latex.eval --checkpoint checkpoints/baseline/best.pt --data-dir data/processed/crohme_test
 """
 
 from __future__ import annotations
@@ -27,13 +27,11 @@ def evaluate(config: ExperimentConfig, checkpoint_path: Path, data_dir: Path) ->
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--data-dir", type=Path, required=True)
     args = parser.parse_args()
 
-    config = ExperimentConfig.from_yaml(args.config)
-    metrics = evaluate(config, args.checkpoint, args.data_dir)
+    metrics = evaluate(ExperimentConfig(), args.checkpoint, args.data_dir)
     print(metrics)
 
 

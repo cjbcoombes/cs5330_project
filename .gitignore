@@ -6,14 +6,10 @@ __pycache__/
 *.egg-info/
 
 # Data and artifacts (large, regenerable, not for git)
-data/raw/*
-!data/raw/.gitkeep
-data/processed/*
-!data/processed/.gitkeep
-checkpoints/*
-!checkpoints/.gitkeep
-runs/*
-!runs/.gitkeep
+data/raw/
+data/processed/
+checkpoints/
+runs/
 
 # Notebooks: keep .ipynb but strip large outputs if needed later
 .ipynb_checkpoints/

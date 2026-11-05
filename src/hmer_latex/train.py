@@ -1,20 +1,17 @@
 """Training entry point.
 
 Usage:
-    uv run python -m hmer_latex.train --config configs/base.yaml
+    uv run python -m hmer_latex.train
 """
 
 from __future__ import annotations
-
-import argparse
-from pathlib import Path
 
 import torch
 
 from hmer_latex.config import ExperimentConfig
 
 
-def pick_device(requested: str) -> torch.device:
+def pick_device(requested: str = "auto") -> torch.device:
     if requested != "auto":
         return torch.device(requested)
     if torch.cuda.is_available():
@@ -40,12 +37,7 @@ def train(config: ExperimentConfig) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=Path, required=True)
-    args = parser.parse_args()
-
-    config = ExperimentConfig.from_yaml(args.config)
-    train(config)
+    train(ExperimentConfig())
 
 
 if __name__ == "__main__":

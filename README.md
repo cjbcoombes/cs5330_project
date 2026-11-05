@@ -11,15 +11,14 @@ uv sync
 ```
 
 This creates `.venv/` and installs everything from `pyproject.toml`. Run
-anything in the project with `uv run ...` (e.g. `uv run python -m hmer_latex.train --config configs/base.yaml`)
+anything in the project with `uv run ...` (e.g. `uv run python -m hmer_latex.train`)
 so it uses that environment.
 
 ## Layout
 
 ```
-configs/            YAML experiment configs (one per run variant) + datasets.yaml manifest
 scripts/
-  download_data.py  Fetches raw datasets per configs/datasets.yaml (not run yet -- URLs are TODO)
+  download_data.py  Fetches + extracts CROHME/HME100K raw archives
 src/hmer_latex/
   data/
     render_inkml.py renders CROHME InkML strokes -> raster images + labels
@@ -29,11 +28,11 @@ src/hmer_latex/
     encoder.py       DenseNet CNN encoder (Lon)
     decoder.py       Transformer decoder, BTTR-style bidirectional training (Chris)
     model.py          combined encoder-decoder model
-  config.py           dataclass config, loaded from YAML
+  config.py           dataclass config (edit defaults directly for now)
   train.py             training loop CLI
   eval.py               evaluation / ExpRate CLI
 data/
-  raw/                untouched downloaded datasets (gitignored)
+  raw/                downloaded datasets (gitignored; already present, see below)
   processed/          rendered images + labels ready for training (gitignored)
 checkpoints/          model checkpoints (gitignored)
 runs/                 TensorBoard logs (gitignored)
@@ -60,15 +59,46 @@ pipeline.
 
 Scaffolding only -- most modules are stubs (`NotImplementedError`) marking
 out the architecture described in the proposal. Not yet runnable end to
-end. Data has not been downloaded.
+end. Raw CROHME (2016 + 2023) and HME100K data is already downloaded and
+extracted under `data/raw/` (see `scripts/download_data.py` for sources).
 
-## Next steps
+## Roadmap
 
-1. ~~Find and confirm real download URLs for CROHME + HME100K.~~ Done --
-   see `configs/datasets.yaml` (CROHME 2023 from Zenodo, CROHME 2016 +
-   HME100K from the figshare bundle). Not downloaded yet; run
-   `scripts/download_data.py` when ready.
-2. Implement `data/render_inkml.py` against a real sample `.inkml` file.
-3. Implement `DenseNetEncoder` and `TransformerDecoder`, get a tiny subset
-   overfitting end to end as a sanity check.
-4. Fill in the training loop (`train.py`) and eval loop (`eval.py`).
+Split: Chris implements the ML models/techniques by hand (architecture,
+training loop, decoding). Claude handles everything else (data pipeline,
+infra, augmentation).
+
+**Phase 0 -- data pipeline (Claude)**
+1. ~~Download CROHME + HME100K.~~ Done.
+2. `data/render_inkml.py`: parse InkML traces + ground-truth LaTeX
+   annotation, rasterize strokes to grayscale images, tokenize LaTeX into
+   whitespace-separated symbols (CROHME truth strings aren't pre-tokenized,
+   e.g. `\sum_{i\leq d}`, so this needs a small regex tokenizer).
+3. Run `render_dataset` over CROHME train/val/test splits ->
+   `data/processed/crohme_{train,val,test}/` + `labels.tsv`.
+4. Build vocab from training labels (`Vocab.build_from_labels`), save to
+   `data/processed/vocab.json`.
+5. `data/datasets.py::collate_batch`: pad images to a common size, pad
+   token sequences, produce batched tensors.
+6. (Later) HME100K prep + synthetic photographic augmentation
+   (perspective/lighting/blur) -- the "extend to photographed handwriting"
+   part of the proposal, also Claude's.
+
+**Phase 1 -- model architecture (Chris, by hand)**
+7. `models/encoder.py`: DenseNet encoder.
+8. `models/decoder.py`: 2D positional encoding + transformer decoder,
+   BTTR-style bidirectional (L2R/R2L) training.
+9. `models/model.py::generate`: autoregressive decode (greedy/beam),
+   L2R/R2L fusion.
+10. `train.py`: full loop -- loss, optimizer, schedule, teacher forcing,
+    checkpointing, validation ExpRate.
+11. `eval.py`: ExpRate + symbol error rate over a checkpoint.
+
+**Phase 2 -- iteration (joint)**
+12. Sanity check: overfit a tiny subset end-to-end.
+13. Full CROHME training run, baseline numbers.
+14. Fine-tune/evaluate on HME100K to see clean -> photographed
+    degradation (the core proposal question); iterate on augmentation
+    (Claude) vs. architecture changes like coverage attention (Chris)
+    depending on where the error comes from.
+15. Error analysis / attention visualization notebooks.

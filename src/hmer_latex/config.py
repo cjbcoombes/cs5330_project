@@ -1,16 +1,13 @@
-"""Experiment configuration, loaded from YAML (see configs/base.yaml).
+"""Experiment configuration.
 
-We'll be running many variants (different datasets, augmentations,
-preprocessing options) so every run should be driven by a config file
-rather than hardcoded args -- makes runs reproducible and diffable.
+Plain dataclasses with defaults -- for now, one variant at a time, edited
+directly in code. If/when we're running many variants side by side, revisit
+moving this to YAML configs.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from pathlib import Path
-
-import yaml
 
 
 @dataclass
@@ -46,12 +43,3 @@ class ExperimentConfig:
     data: DataConfig = field(default_factory=DataConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
     train: TrainConfig = field(default_factory=TrainConfig)
-
-    @classmethod
-    def from_yaml(cls, path: Path) -> "ExperimentConfig":
-        raw = yaml.safe_load(Path(path).read_text()) or {}
-        return cls(
-            data=DataConfig(**raw.get("data", {})),
-            model=ModelConfig(**raw.get("model", {})),
-            train=TrainConfig(**raw.get("train", {})),
-        )
