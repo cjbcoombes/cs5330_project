@@ -22,9 +22,12 @@ class DataConfig:
 
 @dataclass
 class ModelConfig:
-    d_model: int = 256
-    nhead: int = 8
-    num_decoder_layers: int = 3
+    # MVP defaults (SimpleCNNEncoder + 1-layer/1-head decoder, see README
+    # Roadmap Phase 1a). Bump these once the MVP loop runs end to end and
+    # you swap in DenseNetEncoder.
+    d_model: int = 64
+    nhead: int = 1
+    num_decoder_layers: int = 1
 
 
 @dataclass

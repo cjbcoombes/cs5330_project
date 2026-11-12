@@ -84,20 +84,34 @@ infra, augmentation).
    (perspective/lighting/blur) -- the "extend to photographed handwriting"
    part of the proposal, also Claude's.
 
-**Phase 1 -- model architecture (Chris, by hand)**
-7. `models/encoder.py`: DenseNet encoder.
-8. `models/decoder.py`: 2D positional encoding + transformer decoder,
-   BTTR-style bidirectional (L2R/R2L) training.
-9. `models/model.py::generate`: autoregressive decode (greedy/beam),
-   L2R/R2L fusion.
-10. `train.py`: full loop -- loss, optimizer, schedule, teacher forcing,
-    checkpointing, validation ExpRate.
-11. `eval.py`: ExpRate + symbol error rate over a checkpoint.
+**Phase 1a -- end-to-end MVP (Chris, by hand)**
+
+An encoder or decoder alone can't be validated, so build the smallest
+pair that can run the *whole* pipeline (image -> encoder -> decoder ->
+loss -> greedy decode) before sinking time into the real architecture:
+`SimpleCNNEncoder` (a few plain conv/pool layers) + `TransformerDecoder`
+with `nhead=1, num_layers=1`, trained L2R only, decoded greedy-only. Get
+this overfitting a tiny slice of CROHME end to end -- that's the signal
+the rest of the pipeline (data, loss, checkpointing, decoding) actually
+works, before scaling up complexity.
+7. `models/encoder.py::SimpleCNNEncoder`.
+8. `models/decoder.py::TransformerDecoder` (MVP params), `PositionalEncoding2D`.
+9. `models/model.py::generate`: greedy decode only.
+10. `train.py`: loop with loss/optimizer/checkpointing, run against the MVP model.
+11. `eval.py`: ExpRate over a checkpoint.
+
+**Phase 1b -- scale up architecture (Chris, by hand)**
+
+Once the MVP loop runs end to end, swap in the real pieces -- these are
+additions on top of the same interfaces, not rewrites.
+12. `models/encoder.py::DenseNetEncoder`: swap in for `SimpleCNNEncoder`.
+13. Bump decoder `nhead`/`num_layers`, add BTTR-style bidirectional
+    (L2R/R2L) training.
+14. `models/model.py::generate`: beam search, L2R/R2L fusion.
 
 **Phase 2 -- iteration (joint)**
-12. Sanity check: overfit a tiny subset end-to-end.
-13. Full CROHME training run, baseline numbers.
-14. Fine-tune/evaluate on HME100K to see clean -> photographed
+15. Full CROHME training run, baseline numbers.
+16. Fine-tune/evaluate on HME100K to see clean -> photographed
     degradation (the core proposal question); iterate on augmentation
     (Claude) vs. architecture changes like coverage attention (Chris)
     depending on where the error comes from.

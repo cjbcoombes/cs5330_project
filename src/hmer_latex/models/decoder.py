@@ -8,6 +8,12 @@ bidirectionally (L2R + R2L) and decoded by fusing both directions at
 inference. Coverage attention (from WAP) is explicitly something we want
 to evaluate the need for, per the proposal -- keep that as an optional
 module, not baked into the base decoder.
+
+MVP target (README Roadmap, Phase 1a): instantiate this same class with
+nhead=1, num_layers=1, train L2R only (single direction, no bidirectional
+fusion), and decode greedy-only in model.py::generate. The class/forward
+signature below should already support that -- bidirectional training and
+beam search are additions on top, not interface changes.
 """
 
 from __future__ import annotations
