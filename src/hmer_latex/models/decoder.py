@@ -33,20 +33,25 @@ class PositionalEncoding2D(nn.Module):
 
         C = d_model
         L = max_len
-        half = C // 2
+        fourth = C // 4
 
-        pos = torch.arange(0, L)
-        i = torch.arange(0, half)
-        denom = 1 / torch.pow(self.max_len, 2 * i / C)
+        pos = torch.arange(0, L, dtype=torch.float)
+        i = torch.arange(0, fourth, dtype=torch.float)
+        denom = 1 / torch.pow(self.seq_denom, 2 * i / C)
 
-        cross_prod = pos.reshape((L, 1)) * denom.reshape((1, half))
+        # (C/4, L)
+        self.cross_prod = pos.reshape((1, L)) * denom.reshape((fourth, 1))
 
-        pe = torch.zeros((L, C), dtype=torch.float)
-        pe[:, 0::2] = torch.sin(cross_prod)[:, :half]
-        pe[:, 1::2] = torch.cos(cross_prod)[:, :half]
+    def get_pe(self, L) -> torch.Tensor:
+        # Creates PE along one dimension (W or H) to be combined
 
-        # pe is (C, L) can be mapped to (C/2, H) or (C/2, W)
-        self.pe = pe.T
+        C = self.d_model // 2
+        pe = torch.zeros((C, L), dtype=torch.float)
+        cross = self.cross_prod[:(C//2), :L] / L
+        pe[0::2, :] = torch.sin(cross)
+        pe[1::2, :] = torch.cos(cross)
+
+        return pe
 
     def forward(self, features: torch.Tensor) -> torch.Tensor:
         """features: (B, C, H', W') -> same shape, with position info added."""
@@ -58,10 +63,10 @@ class PositionalEncoding2D(nn.Module):
 
         # (B, W, C, H) for adding (C, H) pe
         a = features.permute(0, 3, 1, 2)
-        a[:, :, :half, :] += self.pe[:half, :H]
+        a[:, :, :half, :] += self.get_pe(H)
         # (B, H, C, W) for adding (C, W) pe
         b = a.permute(0, 3, 2, 1)
-        b[:, :, :half, :] += self.pe[:half, :W]
+        b[:, :, half:, :] += self.get_pe(W)
 
         # (B, C, H, W) for return
         out = b.permute(0, 2, 1, 3)
