@@ -140,6 +140,3 @@ class DenseNetEncoder(nn.Module):
         x = self.stages(x)
         x = self.post_norm(x)
         return self.proj(x)
-
-enc = DenseNetEncoder(out_channels=256)
-print(enc(torch.randn(2, 1, 128, 256)).shape)  # expect (2, 256, 8, 16)
