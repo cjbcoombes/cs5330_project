@@ -14,8 +14,16 @@ from dataclasses import dataclass, field
 class DataConfig:
     train_dir: str = "data/processed/crohme_train"
     val_dir: str = "data/processed/crohme_val"
+    test_dir: str = "data/processed/crohme_test"
+    tiny_dir: str = "data/processed/crohme_tiny"  # 64-sample MVP overfit slice
     vocab_path: str = "data/processed/vocab.json"
-    image_size: tuple[int, int] = (256, 256)
+
+    # (width, height), PIL's order -- the resulting tensor is (1, height, width).
+    # Wide because 93% of CROHME expressions are wider than tall (median
+    # aspect 3.13:1); a square canvas spends ~68% of its pixels on whitespace.
+    # With SimpleCNNEncoder's /32 downsampling this gives a 12x4 = 48-position
+    # feature grid.
+    image_size: tuple[int, int] = (384, 128)
     batch_size: int = 16
     num_workers: int = 4
 
