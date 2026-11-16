@@ -10,10 +10,28 @@ from __future__ import annotations
 import csv
 from pathlib import Path
 
+import torch
 from PIL import Image
 from torch.utils.data import Dataset
+from torchvision import transforms
 
 from hmer_latex.data.vocab import Vocab
+
+
+def default_transform():
+    """PIL grayscale image -> float tensor (1, H, W) with ink=1, background=0.
+
+    The renderer writes black ink on white so the PNGs stay human-readable,
+    but the model wants the opposite polarity: the encoder's convs use
+    `padding=1`, i.e. *zero* padding, so background-as-zero means the
+    implicit border matches real background instead of reading as ink.
+    """
+    return transforms.Compose(
+        [
+            transforms.ToTensor(),  # (1, H, W) float32 in [0, 1]
+            transforms.Lambda(lambda x: 1.0 - x),
+        ]
+    )
 
 
 class HMEDataset(Dataset):
@@ -28,7 +46,7 @@ class HMEDataset(Dataset):
     @staticmethod
     def _load_labels(labels_path: Path) -> list[tuple[str, str]]:
         with open(labels_path, newline="") as f:
-            return [(row[0], row[1]) for row in csv.reader(f, delimiter="\t")]
+            return [(row[0], row[1]) for row in csv.reader(f, delimiter="\t") if row]
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -42,8 +60,50 @@ class HMEDataset(Dataset):
         return image, token_ids
 
 
-def collate_batch(batch, pad_id: int):
-    """TODO: pad images to a common size and token sequences to a common
-    length, return (image_batch, image_lengths?, token_batch, token_lengths).
+def collate_batch(batch, pad_id: int, sos_id: int, eos_id: int):
+    """Stack a list of (image, token_ids) samples into padded batch tensors.
+
+    Returns (images, tgt_in, tgt_out, tgt_pad_mask):
+
+        images        (B, 1, H, W)  float32
+        tgt_in        (B, T)        int64   [sos] + ids, pad-filled
+        tgt_out       (B, T)        int64   ids + [eos], pad-filled
+        tgt_pad_mask  (B, T)        bool    True where tgt_in is padding
+
+    `tgt_in` and `tgt_out` are the same ids offset by one position -- that
+    offset *is* teacher forcing. Position t of tgt_in is the input the
+    decoder conditions on to predict position t of tgt_out.
+
+    The sos/eos convention lives here rather than in Vocab.encode (which
+    adds neither) or in the training loop, so that one function owns it.
+    `model.generate` has to agree with it; nothing enforces that statically.
+
+    Images need no padding -- the renderer emits a fixed canvas, so they are
+    already a common size. `T` is per-batch, not global.
+
+    `tgt_pad_mask` is returned but not yet consumed: the MVP decoder's
+    forward() takes no padding-mask argument, and
+    CrossEntropyLoss(ignore_index=pad_id) is what keeps padded positions out
+    of the loss. Wire it in as `tgt_key_padding_mask` before any real
+    training run -- without it, padded positions still take part in
+    attention normalization, so a sample's activations depend slightly on
+    what else happens to be in its batch.
     """
-    raise NotImplementedError("TODO: implement once image transform/sizing strategy is decided")
+    images, token_lists = zip(*batch)
+
+    image_batch = torch.stack(images, dim=0)
+
+    max_len = max(len(ids) for ids in token_lists) + 1
+    tgt_in = torch.full((len(token_lists), max_len), pad_id, dtype=torch.long)
+    tgt_out = torch.full((len(token_lists), max_len), pad_id, dtype=torch.long)
+    for i, ids in enumerate(token_lists):
+        tgt_in[i, 0] = sos_id
+        if ids:
+            seq = torch.tensor(ids, dtype=torch.long)
+            tgt_in[i, 1 : len(ids) + 1] = seq
+            tgt_out[i, : len(ids)] = seq
+        tgt_out[i, len(ids)] = eos_id
+
+    tgt_pad_mask = tgt_in == pad_id
+
+    return image_batch, tgt_in, tgt_out, tgt_pad_mask
