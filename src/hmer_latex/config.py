@@ -41,6 +41,7 @@ class ModelConfig:
 @dataclass
 class TrainConfig:
     epochs: int = 50
+    batch_size: int = 64
     lr: float = 1e-4
     weight_decay: float = 1e-4
     device: str = "auto"  # "auto" picks cuda > mps > cpu
