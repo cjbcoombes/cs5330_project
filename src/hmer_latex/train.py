@@ -2,14 +2,23 @@
 
 Usage:
     uv run python -m hmer_latex.train
+
+Logs scalars to TensorBoard under `{train.log_dir}/{train.run_name}`:
+
+    uv run tensorboard --logdir runs
 """
 
 from __future__ import annotations
 
+from dataclasses import asdict
+from pathlib import Path
+
 import torch
+from torch.utils.tensorboard import SummaryWriter
+from tqdm import tqdm
 
 from hmer_latex.config import ExperimentConfig
-from hmer_latex.data.vocab import Vocab
+from hmer_latex.data.vocab import PAD, Vocab
 from hmer_latex.data.datasets import HMEDataset, default_transform, collate_batch
 
 from hmer_latex.models.model import HMERModel
@@ -25,11 +34,43 @@ def pick_device(requested: str = "auto") -> torch.device:
     return torch.device("cpu")
 
 
+def save_checkpoint(
+    path: Path,
+    model: torch.nn.Module,
+    opt: torch.optim.Optimizer,
+    lr_sched: torch.optim.lr_scheduler.LRScheduler,
+    config: ExperimentConfig,
+    epoch: int,
+    best_loss: float,
+) -> None:
+    """Write everything needed to either resume training or run inference.
+
+    `config` is here because you need d_model/nhead/num_decoder_layers to
+    *construct* the model before load_state_dict will accept the weights;
+    `vocab_path` because token id 47 means nothing on its own, and a
+    rebuilt vocab reorders ids and silently produces fluent nonsense.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(
+        {
+            "model": model.state_dict(),
+            "optimizer": opt.state_dict(),
+            "scheduler": lr_sched.state_dict(),
+            "epoch": epoch,
+            "best_loss": best_loss,
+            "config": asdict(config),
+            "vocab_path": config.data.vocab_path,
+        },
+        path,
+    )
+
+
 def train(config: ExperimentConfig) -> None:
     device = pick_device(config.train.device)
     print(f"Training on device: {device}")
 
     vocab = Vocab.load(config.data.vocab_path)
+    pad_id = vocab.stoi[PAD]
     print(f"Loaded vocab from '{config.data.vocab_path}' with {len(vocab)} symbols")
 
     ds = HMEDataset(
@@ -67,10 +108,23 @@ def train(config: ExperimentConfig) -> None:
 
     ce_loss = torch.nn.CrossEntropyLoss()
 
+    ckpt_dir = Path(config.train.checkpoint_dir) / config.train.run_name
+    writer = SummaryWriter(log_dir=Path(config.train.log_dir) / config.train.run_name)
+    print(f"Logging to '{writer.log_dir}', checkpointing to '{ckpt_dir}'")
+
+    step = 0
+    best_loss = float("inf")
+
     for epoch_i in range(num_epochs):
         model.train()
 
-        for batch_i, (imgs, tgt_in, tgt_out, tgt_mask) in enumerate(dl):
+        # Token-weighted, not a mean of batch means: T varies per batch, so
+        # averaging batch losses over-weights batches of short formulas.
+        epoch_loss_sum = 0.0
+        epoch_tokens = 0
+
+        bar = tqdm(dl, desc=f"epoch {epoch_i + 1}/{num_epochs}", leave=False)
+        for batch_i, (imgs, tgt_in, tgt_out, tgt_mask) in enumerate(bar):
             imgs     : torch.Tensor = imgs.to(device)
             tgt_in   : torch.Tensor = tgt_in.to(device)
             tgt_out  : torch.Tensor = tgt_out.to(device)
@@ -83,15 +137,32 @@ def train(config: ExperimentConfig) -> None:
             opt.step()
             lr_sched.step()
 
+            n_tokens = int((tgt_out != pad_id).sum())
+            epoch_loss_sum += loss.item() * n_tokens
+            epoch_tokens += n_tokens
+
+            writer.add_scalar("train/loss", loss.item(), step)
+            writer.add_scalar("train/lr", lr_sched.get_last_lr()[0], step)
+            bar.set_postfix(loss=f"{loss.item():.4f}")
+            step += 1
+
+        epoch_loss = epoch_loss_sum / max(epoch_tokens, 1)
+        writer.add_scalar("train/loss_epoch", epoch_loss, epoch_i)
+        print(f"epoch {epoch_i + 1}/{num_epochs}  train_loss={epoch_loss:.4f}  lr={lr_sched.get_last_lr()[0]:.2e}")
+
+        save_checkpoint(ckpt_dir / "last.pt", model, opt, lr_sched, config, epoch_i, best_loss)
+        if epoch_loss < best_loss:
+            best_loss = epoch_loss
+            save_checkpoint(ckpt_dir / "best.pt", model, opt, lr_sched, config, epoch_i, best_loss)
+
+    writer.close()
+    print(f"Done. best train_loss={best_loss:.4f}, checkpoints in '{ckpt_dir}'")
+
     # TODO:
-    # - load Vocab from config.data.vocab_path
-    # - build HMEDataset/DataLoader for train + val
-    # - build HMERModel, move to device
-    # - optimizer (AdamW), LR schedule
-    # - training loop with teacher forcing, cross-entropy loss (ignore pad)
-    # - periodic validation: ExpRate (exact match) on held-out set
-    # - checkpoint to config.train.checkpoint_dir, logs to config.train.log_dir
-    raise NotImplementedError("TODO: implement training loop")
+    # - build HMEDataset/DataLoader for *val* too (currently train-only on tiny_dir)
+    # - periodic validation: ExpRate (exact match) on held-out set, and
+    #   select best.pt on that rather than on train loss
+    # - log val/loss, val/exprate and ref-vs-pred add_text samples
 
 
 def main() -> None:
