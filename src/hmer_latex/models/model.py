@@ -12,21 +12,33 @@ from __future__ import annotations
 import torch
 from torch import nn
 
-from hmer_latex.models.decoder import TransformerDecoder
+from hmer_latex.models.decoder import TransformerDecoder, PositionalEncoding2D
 from hmer_latex.models.encoder import SimpleCNNEncoder
 
 
 class HMERModel(nn.Module):
-    def __init__(self, vocab_size: int, d_model: int = 64, nhead: int = 1, num_decoder_layers: int = 1):
+    def __init__(self, vocab_size: int, d_model: int = 64, nhead: int = 1, num_decoder_layers: int = 1, max_img_len: int = 100, max_seq_len: int = 100):
         super().__init__()
         self.encoder = SimpleCNNEncoder(out_channels=d_model)
+        self.posenc2d = PositionalEncoding2D(d_model=d_model, max_len=max_img_len)
         self.decoder = TransformerDecoder(
-            vocab_size=vocab_size, d_model=d_model, nhead=nhead, num_layers=num_decoder_layers
+            vocab_size=vocab_size, 
+            d_model=d_model, 
+            nhead=nhead, 
+            num_layers=num_decoder_layers,
+            max_seq_len=max_seq_len
         )
 
     def forward(self, images: torch.Tensor, target_ids: torch.Tensor) -> torch.Tensor:
+        """
+        images: (B, 1, H, W)
+        target_ids: (B, T)
+        -> logits: (B, T, vocab_size)
+        """
+
         features = self.encoder(images)  # (B, C, H', W')
-        memory = features.flatten(2).permute(0, 2, 1)  # (B, H'*W', C)
+        pos_features = self.posenc2d(features) # (B, C, H', W')
+        memory = pos_features.flatten(2).permute(0, 2, 1)  # (B, H'*W', C)
         return self.decoder(memory, target_ids)
 
     @torch.no_grad()

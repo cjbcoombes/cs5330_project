@@ -23,9 +23,10 @@ from torch import nn
 
 
 class SimpleCNNEncoder(nn.Module):
-    """MVP encoder: plain conv/pool stack, no dense blocks."""
+    """(B, 1, H, W) -> (B, C, H', W')"""
 
     def __init__(self, in_channels: int = 1, out_channels: int = 64):
+        """(B, 1, H, W) -> (B, C, H', W')"""
         super().__init__()
 
         self.body = nn.Sequential(
