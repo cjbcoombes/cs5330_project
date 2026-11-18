@@ -18,11 +18,10 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 from hmer_latex.config import ExperimentConfig
-from hmer_latex.data.vocab import PAD, Vocab
+from hmer_latex.data.vocab import PAD, SOS, EOS, Vocab
 from hmer_latex.data.datasets import HMEDataset, default_transform, collate_batch
 
 from hmer_latex.models.model import HMERModel
-
 
 def pick_device(requested: str = "auto") -> torch.device:
     if requested != "auto":
@@ -71,7 +70,12 @@ def train(config: ExperimentConfig) -> None:
 
     vocab = Vocab.load(config.data.vocab_path)
     pad_id = vocab.stoi[PAD]
+    sos_id = vocab.stoi[SOS]
+    eos_id = vocab.stoi[EOS]
     print(f"Loaded vocab from '{config.data.vocab_path}' with {len(vocab)} symbols")
+
+    def collate(batch):
+        return collate_batch(batch, pad_id=pad_id, sos_id=sos_id, eos_id=eos_id)
 
     ds = HMEDataset(
         data_dir=config.data.tiny_dir, # temporary: use tiny_dir rather than train_dir
@@ -80,11 +84,12 @@ def train(config: ExperimentConfig) -> None:
     )
     dl = torch.utils.data.DataLoader(
         dataset=ds,
-        batch_size=config.train.batch_size,
+        batch_size=config.data.batch_size,
         shuffle=True,
-        collate_fn=collate_batch
+        collate_fn=collate,
+        num_workers=config.data.num_workers
     )
-    print(f"Loaded data from '{config.data.tiny_dir}', batch_size={config.train.batch_size}, batches={len(dl)}")
+    print(f"Loaded data from '{config.data.tiny_dir}', batch_size={config.data.batch_size}, batches={len(dl)}")
 
     model = HMERModel(
         vocab_size=len(vocab),
@@ -101,12 +106,13 @@ def train(config: ExperimentConfig) -> None:
 
     opt = torch.optim.AdamW(
         params=model.parameters(),
-        lr=config.train.lr
+        lr=config.train.lr,
+        weight_decay=config.train.weight_decay
     )
     lr_sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, num_epochs * num_batches)
 
 
-    ce_loss = torch.nn.CrossEntropyLoss()
+    ce_loss = torch.nn.CrossEntropyLoss(ignore_index=pad_id)
 
     ckpt_dir = Path(config.train.checkpoint_dir) / config.train.run_name
     writer = SummaryWriter(log_dir=Path(config.train.log_dir) / config.train.run_name)
@@ -132,8 +138,9 @@ def train(config: ExperimentConfig) -> None:
 
             opt.zero_grad()
             logits = model(imgs, tgt_in)
-            loss = ce_loss(logits, tgt_out)
+            loss = ce_loss(logits.transpose(1, 2), tgt_out)
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             opt.step()
             lr_sched.step()
 

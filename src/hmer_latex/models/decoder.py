@@ -37,24 +37,35 @@ class PositionalEncoding2D(nn.Module):
 
         C = d_model
         L = max_len
-        fourth = C // 4
 
         pos = torch.arange(0, L, dtype=torch.float)
-        i = torch.arange(0, fourth, dtype=torch.float)
+        i = torch.arange(0, C // 4, dtype=torch.float)
         denom = 1 / torch.pow(self.seq_denom, 2 * i / C)
 
         # (C/4, L)
-        self.cross_prod = pos.reshape((1, L)) * denom.reshape((fourth, 1))
+        cross_prod = pos.reshape((1, L)) * denom.reshape((C // 4, 1))
+        self.register_buffer("cross_prod", cross_prod, persistent=False)
+
+        # (L, dtype, device) -> Tensor
+        self.pe_cache = {}
 
     def get_pe(self, L) -> torch.Tensor:
         # Creates PE along one dimension (W or H) to be combined
 
-        C = self.d_model // 2
-        pe = torch.zeros((C, L), dtype=torch.float)
-        cross = self.cross_prod[:(C//2), :L] / L
-        pe[0::2, :] = torch.sin(cross)
-        pe[1::2, :] = torch.cos(cross)
+        cross = self.cross_prod
+        dtype = cross.dtype
+        device = cross.device
+        key = (L, dtype, device)
+        if key in self.pe_cache:
+            return self.pe_cache[key]
 
+        C = self.d_model // 2
+        pe = torch.zeros((C, L), dtype=dtype, device=device)
+        cross_scaled = self.cross_prod[:(C//2), :L] / L
+        pe[0::2, :] = torch.sin(cross_scaled)
+        pe[1::2, :] = torch.cos(cross_scaled)
+
+        self.pe_cache[key] = pe
         return pe
 
     def forward(self, features: torch.Tensor) -> torch.Tensor:
@@ -68,7 +79,7 @@ class PositionalEncoding2D(nn.Module):
         half = C // 2
 
         # (B, W, C, H) for adding (C, H) pe
-        a = features.permute(0, 3, 1, 2)
+        a = features.permute(0, 3, 1, 2).clone()
         a[:, :, :half, :] += self.get_pe(H)
         # (B, H, C, W) for adding (C, W) pe
         b = a.permute(0, 3, 2, 1)
@@ -106,7 +117,7 @@ class PositionalEncoding1D(nn.Module):
         pe = torch.zeros((C, L), dtype=torch.float)
         pe[0::2, :] = torch.sin(cross)
         pe[1::2, :] = torch.cos(cross)
-        self.pe = pe
+        self.register_buffer("pe", pe, persistent=False)
 
     def forward(self, features: torch.Tensor) -> torch.Tensor:
         """features: (B, C, L) -> same shape, with position info added."""
@@ -166,7 +177,7 @@ class TransformerDecoder(nn.Module):
         embed = self.embed(target_ids)
         assert embed.shape == (B, T, D)
 
-        pos_embed = self.posenc(embed)
+        pos_embed = self.posenc(embed.transpose(1, 2)).transpose(1, 2)
         assert pos_embed.shape == (B, T, D)
 
         # TODO: multiply by sqrt(D)? why?
@@ -174,7 +185,8 @@ class TransformerDecoder(nn.Module):
         trans = self.trans(
             tgt = pos_embed,
             tgt_mask = mask,
-            memory = memory
+            memory = memory,
+            tgt_is_causal=True
         )
         assert trans.shape == (B, T, D)
 
