@@ -9,6 +9,16 @@ from hmer_latex.models.decoder import (
 from hmer_latex.models.encoder import SimpleCNNEncoder
 
 
+def no_pad(target_ids: torch.Tensor) -> torch.Tensor:
+    """The `target_ids_mask` for a batch with no padding in it.
+
+    `tgt_key_padding_mask` semantics (and collate_batch's): True marks a
+    position to be *ignored*, so an unpadded batch is all-False. Most tests
+    below are about something other than padding, and pass this.
+    """
+    return torch.zeros(target_ids.shape, dtype=torch.bool)
+
+
 def test_positional_encoding_2d_explicit_values_small():
     """Checks PositionalEncoding2D against hand-computed sin/cos values.
 
@@ -241,7 +251,8 @@ def test_transformer_decoder_output_shape():
     B, L, C, T, V = 2, 48, 64, 7, 138
 
     dec = TransformerDecoder(vocab_size=V, d_model=C, nhead=1, num_layers=1)
-    logits = dec(torch.randn(B, L, C), torch.randint(0, V, (B, T)))
+    target = torch.randint(0, V, (B, T))
+    logits = dec(torch.randn(B, L, C), target, no_pad(target))
 
     assert logits.shape == (B, T, V)
 
@@ -253,7 +264,8 @@ def test_transformer_decoder_shape_for_varying_T():
     memory = torch.randn(B, L, C)
 
     for T in (1, 2, 13, 64):
-        logits = dec(memory, torch.randint(0, V, (B, T)))
+        target = torch.randint(0, V, (B, T))
+        logits = dec(memory, target, no_pad(target))
         assert logits.shape == (B, T, V), f"T={T}"
 
 
@@ -275,8 +287,8 @@ def test_transformer_decoder_is_causal():
     tampered[0, -1] = (target[0, -1] + 1) % V
 
     with torch.no_grad():
-        a = dec(memory, target)
-        b = dec(memory, tampered)
+        a = dec(memory, target, no_pad(target))
+        b = dec(memory, tampered, no_pad(tampered))
 
     torch.testing.assert_close(a[:, :-1, :], b[:, :-1, :])
     # ...and the sanity half: the tampered position itself *should* differ,
@@ -298,7 +310,71 @@ def test_transformer_decoder_prefix_matches_full_sequence():
     target = torch.randint(0, V, (B, T))
 
     with torch.no_grad():
-        full = dec(memory, target)
-        prefix = dec(memory, target[:, :4])
+        full = dec(memory, target, no_pad(target))
+        prefix = dec(memory, target[:, :4], no_pad(target[:, :4]))
 
     torch.testing.assert_close(full[:, :4, :], prefix, rtol=1e-4, atol=1e-5)
+
+
+def test_transformer_decoder_ignores_masked_padding():
+    """A masked tail must not affect the logits of the real prefix.
+
+    This is the whole point of `target_ids_mask`: collate pads every label
+    out to the batch's longest one, so without the mask a sample's
+    activations depend on what else landed in its batch (padded positions
+    still take part in attention normalization). Feeding a 4-token sequence
+    padded to 9 with the pad positions masked must reproduce the unpadded
+    4-token logits.
+    """
+    B, L, C, T, V, PAD = 1, 48, 64, 4, 138, 0
+
+    dec = TransformerDecoder(vocab_size=V, d_model=C, nhead=1, num_layers=1).eval()
+    memory = torch.randn(B, L, C)
+    target = torch.randint(1, V, (B, T))
+
+    padded = torch.cat([target, torch.full((B, 5), PAD)], dim=1)
+    mask = padded == PAD
+
+    with torch.no_grad():
+        short = dec(memory, target, no_pad(target))
+        long = dec(memory, padded, mask)
+
+    torch.testing.assert_close(short, long[:, :T, :], rtol=1e-4, atol=1e-5)
+
+
+def test_transformer_decoder_padding_mask_changes_output():
+    """The sanity half: the mask has to actually reach the attention.
+
+    Without this, test_transformer_decoder_ignores_masked_padding would
+    also pass on a decoder that silently drops `target_ids_mask` -- the
+    causal mask alone already keeps position t from seeing the tail. Here
+    the *masked* positions are early ones, which causality does not hide,
+    so ignoring the argument changes the result.
+    """
+    B, L, C, T, V = 1, 48, 64, 6, 138
+
+    dec = TransformerDecoder(vocab_size=V, d_model=C, nhead=1, num_layers=1).eval()
+    memory = torch.randn(B, L, C)
+    target = torch.randint(1, V, (B, T))
+
+    mask = torch.zeros(B, T, dtype=torch.bool)
+    mask[0, 1:3] = True  # pretend positions 1-2 are padding
+
+    with torch.no_grad():
+        unmasked = dec(memory, target, no_pad(target))
+        masked = dec(memory, target, mask)
+
+    assert not torch.allclose(unmasked[:, -1, :], masked[:, -1, :])
+
+
+def test_transformer_decoder_accepts_mask_for_varying_T():
+    """Mask shape is (B, T) and T is per-batch, like target_ids."""
+    B, L, C, V = 3, 48, 64, 138
+    dec = TransformerDecoder(vocab_size=V, d_model=C, nhead=1, num_layers=1)
+    memory = torch.randn(B, L, C)
+
+    for T in (1, 2, 13, 64):
+        target = torch.randint(0, V, (B, T))
+        mask = torch.zeros(B, T, dtype=torch.bool)
+        mask[:, T // 2 :] = True
+        assert dec(memory, target, mask).shape == (B, T, V), f"T={T}"

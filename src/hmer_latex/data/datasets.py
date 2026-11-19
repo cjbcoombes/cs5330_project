@@ -81,13 +81,14 @@ def collate_batch(batch, pad_id: int, sos_id: int, eos_id: int):
     Images need no padding -- the renderer emits a fixed canvas, so they are
     already a common size. `T` is per-batch, not global.
 
-    `tgt_pad_mask` is returned but not yet consumed: the MVP decoder's
-    forward() takes no padding-mask argument, and
-    CrossEntropyLoss(ignore_index=pad_id) is what keeps padded positions out
-    of the loss. Wire it in as `tgt_key_padding_mask` before any real
-    training run -- without it, padded positions still take part in
-    attention normalization, so a sample's activations depend slightly on
-    what else happens to be in its batch.
+    `tgt_pad_mask` is passed straight through to the model as
+    `target_ids_mask` and ends up as the decoder's `tgt_key_padding_mask`
+    (True = ignore, which is why the mask is `tgt_in == pad_id` rather than
+    its negation). It is what keeps padded positions out of *attention*;
+    CrossEntropyLoss(ignore_index=pad_id) separately keeps them out of the
+    loss. Both are needed -- without the mask, padded positions still take
+    part in attention normalization, so a sample's activations depend
+    slightly on what else happens to be in its batch.
     """
     images, token_lists = zip(*batch)
 
