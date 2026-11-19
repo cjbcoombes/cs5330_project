@@ -127,6 +127,7 @@ def train(config: ExperimentConfig) -> None:
         # Token-weighted, not a mean of batch means: T varies per batch, so
         # averaging batch losses over-weights batches of short formulas.
         epoch_loss_sum = 0.0
+        epoch_correct = 0
         epoch_tokens = 0
 
         bar = tqdm(dl, desc=f"epoch {epoch_i + 1}/{num_epochs}", leave=False)
@@ -137,25 +138,37 @@ def train(config: ExperimentConfig) -> None:
             tgt_mask : torch.Tensor = tgt_mask.to(device)
 
             opt.zero_grad()
-            logits = model(imgs, tgt_in)
+            logits = model(imgs, tgt_in, tgt_mask)
             loss = ce_loss(logits.transpose(1, 2), tgt_out)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             opt.step()
             lr_sched.step()
 
-            n_tokens = int((tgt_out != pad_id).sum())
+            real = tgt_out != pad_id
+            n_tokens = int(real.sum())
+            with torch.no_grad():
+                n_correct = int(((logits.argmax(-1) == tgt_out) & real).sum())
+
             epoch_loss_sum += loss.item() * n_tokens
+            epoch_correct += n_correct
             epoch_tokens += n_tokens
 
+            batch_acc = n_correct / max(n_tokens, 1)
             writer.add_scalar("train/loss", loss.item(), step)
+            writer.add_scalar("train/token_acc", batch_acc, step)
             writer.add_scalar("train/lr", lr_sched.get_last_lr()[0], step)
-            bar.set_postfix(loss=f"{loss.item():.4f}")
+            bar.set_postfix(loss=f"{loss.item():.4f}", acc=f"{batch_acc:.3f}")
             step += 1
 
         epoch_loss = epoch_loss_sum / max(epoch_tokens, 1)
+        epoch_acc = epoch_correct / max(epoch_tokens, 1)
         writer.add_scalar("train/loss_epoch", epoch_loss, epoch_i)
-        print(f"epoch {epoch_i + 1}/{num_epochs}  train_loss={epoch_loss:.4f}  lr={lr_sched.get_last_lr()[0]:.2e}")
+        writer.add_scalar("train/token_acc_epoch", epoch_acc, epoch_i)
+        print(
+            f"epoch {epoch_i + 1}/{num_epochs}  train_loss={epoch_loss:.4f}  "
+            f"token_acc={epoch_acc:.4f}  lr={lr_sched.get_last_lr()[0]:.2e}"
+        )
 
         save_checkpoint(ckpt_dir / "last.pt", model, opt, lr_sched, config, epoch_i, best_loss)
         if epoch_loss < best_loss:

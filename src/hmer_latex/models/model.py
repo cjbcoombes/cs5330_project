@@ -28,18 +28,20 @@ class HMERModel(nn.Module):
             num_layers=num_decoder_layers,
             max_seq_len=max_seq_len
         )
+        self.max_seq_len = max_seq_len
 
-    def forward(self, images: torch.Tensor, target_ids: torch.Tensor) -> torch.Tensor:
+    def forward(self, images: torch.Tensor, target_ids: torch.Tensor, target_ids_mask: torch.Tensor) -> torch.Tensor:
         """
         images: (B, 1, H, W)
         target_ids: (B, T)
+        target_ids_mask: (B, T)
         -> logits: (B, T, vocab_size)
         """
 
         features = self.encoder(images)  # (B, C, H', W')
         pos_features = self.posenc2d(features) # (B, C, H', W')
         memory = pos_features.flatten(2).permute(0, 2, 1)  # (B, H'*W', C)
-        return self.decoder(memory, target_ids)
+        return self.decoder(memory, target_ids, target_ids_mask)
 
     @torch.no_grad()
     def generate(self, images: torch.Tensor, max_len: int, sos_id: int, eos_id: int) -> torch.Tensor:

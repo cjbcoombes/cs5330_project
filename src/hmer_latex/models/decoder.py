@@ -157,10 +157,18 @@ class TransformerDecoder(nn.Module):
         self.d_model = d_model
         self.vocab_size = vocab_size
 
+        mask = torch.triu(
+            torch.full((max_seq_len, max_seq_len), True, dtype=torch.bool),
+            diagonal=1,
+        )
+        self.register_buffer("mask", mask, persistent=False)
+        
+
     def forward(
         self,
         memory: torch.Tensor,
         target_ids: torch.Tensor,
+        target_ids_mask: torch.Tensor,
     ) -> torch.Tensor:
         """memory: (B, H'*W', C) flattened encoder features (with pos. enc.)
         target_ids: (B, T) teacher-forced token ids
@@ -171,7 +179,7 @@ class TransformerDecoder(nn.Module):
         D = self.d_model
         V = self.vocab_size
 
-        mask = nn.Transformer.generate_square_subsequent_mask(T)
+        mask = self.mask[:T, :T]
         assert mask.shape == (T, T)
 
         embed = self.embed(target_ids)
@@ -185,6 +193,7 @@ class TransformerDecoder(nn.Module):
         trans = self.trans(
             tgt = pos_embed,
             tgt_mask = mask,
+            tgt_key_padding_mask = target_ids_mask,
             memory = memory,
             tgt_is_causal=True
         )
