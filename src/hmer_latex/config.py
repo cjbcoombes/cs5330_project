@@ -24,8 +24,8 @@ class DataConfig:
     # With SimpleCNNEncoder's /32 downsampling this gives a 12x4 = 48-position
     # feature grid.
     image_size: tuple[int, int] = (384, 128)
-    batch_size: int = 16
-    num_workers: int = 4
+    batch_size: int = 64
+    num_workers: int = 0
 
 
 @dataclass
@@ -40,13 +40,13 @@ class ModelConfig:
 
 @dataclass
 class TrainConfig:
-    epochs: int = 50
-    lr: float = 1e-4
+    epochs: int = 1000
+    lr: float = 3e-4
     weight_decay: float = 1e-4
     device: str = "auto"  # "auto" picks cuda > mps > cpu
     checkpoint_dir: str = "checkpoints"
     log_dir: str = "runs"
-    run_name: str = "baseline"
+    run_name: str = "baseline_2"
 
 
 @dataclass

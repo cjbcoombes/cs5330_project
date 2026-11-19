@@ -12,28 +12,72 @@ from __future__ import annotations
 import torch
 from torch import nn
 
-from hmer_latex.models.decoder import TransformerDecoder
+from hmer_latex.models.decoder import TransformerDecoder, PositionalEncoding2D
 from hmer_latex.models.encoder import SimpleCNNEncoder
 
 
 class HMERModel(nn.Module):
-    def __init__(self, vocab_size: int, d_model: int = 64, nhead: int = 1, num_decoder_layers: int = 1):
+    def __init__(self, vocab_size: int, d_model: int = 64, nhead: int = 1, num_decoder_layers: int = 1, max_img_len: int = 100, max_seq_len: int = 100):
         super().__init__()
         self.encoder = SimpleCNNEncoder(out_channels=d_model)
+        self.posenc2d = PositionalEncoding2D(d_model=d_model, max_len=max_img_len)
         self.decoder = TransformerDecoder(
-            vocab_size=vocab_size, d_model=d_model, nhead=nhead, num_layers=num_decoder_layers
+            vocab_size=vocab_size, 
+            d_model=d_model, 
+            nhead=nhead, 
+            num_layers=num_decoder_layers,
+            max_seq_len=max_seq_len
         )
+        self.max_seq_len = max_seq_len
 
-    def forward(self, images: torch.Tensor, target_ids: torch.Tensor) -> torch.Tensor:
+    def forward(self, images: torch.Tensor, target_ids: torch.Tensor, target_ids_mask: torch.Tensor) -> torch.Tensor:
+        """
+        images: (B, 1, H, W)
+        target_ids: (B, T)
+        target_ids_mask: (B, T)
+        -> logits: (B, T, vocab_size)
+        """
+
         features = self.encoder(images)  # (B, C, H', W')
-        memory = features.flatten(2).permute(0, 2, 1)  # (B, H'*W', C)
-        return self.decoder(memory, target_ids)
+        pos_features = self.posenc2d(features) # (B, C, H', W')
+        memory = pos_features.flatten(2).permute(0, 2, 1)  # (B, H'*W', C)
+        return self.decoder(memory, target_ids, target_ids_mask)
 
-    @torch.no_grad()
-    def generate(self, images: torch.Tensor, max_len: int, sos_id: int, eos_id: int) -> torch.Tensor:
+    def generate_greedy(self, images: torch.Tensor, sos_id: int, eos_id: int) -> torch.Tensor:
         """Greedy decode at inference time (no teacher forcing).
 
         MVP: greedy, L2R only. Add beam search / L2R+R2L fusion per BTTR
         once the greedy loop works end to end.
         """
-        raise NotImplementedError("TODO: autoregressive greedy decode loop")
+
+        B, _, H, W = images.shape
+        targets = torch.full(
+            (B, 1), fill_value=sos_id
+        )
+
+        for i in range(self.max_seq_len):
+            targets_mask = torch.full(
+                targets.shape, fill_value=False, dtype=torch.bool
+            )
+
+            step = self.forward(images, targets, targets_mask)
+            step = torch.argmax(step, dim=2)
+            assert step.shape == (B, i+1)
+            new_toks = step[:, -1].reshape((B, 1))
+
+            targets = torch.cat((targets, new_toks), dim=1)
+            done = (targets == eos_id).any(dim=1).all()
+            if done:
+                break
+
+        return targets        
+
+    def generate(self, images: torch.Tensor, sos_id: int, eos_id: int) -> torch.Tensor:
+        """Greedy decode at inference time (no teacher forcing).
+
+        MVP: greedy, L2R only. Add beam search / L2R+R2L fusion per BTTR
+        once the greedy loop works end to end.
+        """
+
+        with torch.no_grad():
+            return self.generate_greedy(images, sos_id, eos_id)
