@@ -25,6 +25,11 @@ from torch import nn
 class SimpleCNNEncoder(nn.Module):
     """(B, 1, H, W) -> (B, C, H', W')"""
 
+    # Four stride-2 convs plus one stride-2 pool. HMERModel reads this to
+    # downsample the image padding mask to the feature grid, so it has to
+    # match `body` -- if you change the strides, change this.
+    total_stride = 32
+
     def __init__(self, in_channels: int = 1, out_channels: int = 64):
         """(B, 1, H, W) -> (B, C, H', W')"""
         super().__init__()
@@ -100,6 +105,10 @@ class DenseNetEncoder(nn.Module):
     output is 684 channels. If out_channels is anything else (e.g. d_model
     from HMERModel), a 1x1 conv projects to it.
     """
+
+    # Stem conv /2 + stem maxpool /2, then two transition avg-pools /2.
+    # Read by HMERModel to downsample the image padding mask; keep in sync.
+    total_stride = 16
 
     def __init__(
         self,

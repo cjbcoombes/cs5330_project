@@ -29,7 +29,8 @@ src/hmer_latex/
     encoder.py       DenseNet CNN encoder (Lon)
     decoder.py       Transformer decoder, BTTR-style bidirectional training (Chris)
     model.py          combined encoder-decoder model
-  config.py           dataclass config (edit defaults directly for now)
+  config.py           dataclasses + presets, overridable from the CLI
+  metrics.py           ExpRate / ExpRate@1 / @2 / symbol error rate
   train.py             training loop CLI
   eval.py               evaluation / ExpRate CLI
 data/
@@ -56,22 +57,58 @@ useful once we're rendering/evaluating InkML:
 Not added as submodules yet -- pull in when we get to the rendering/eval
 pipeline.
 
+## Running it
+
+```bash
+uv run python scripts/prepare_data.py              # render data, ~15s
+uv run python -m hmer_latex.train --preset densenet_small
+uv run tensorboard --logdir runs
+```
+
+Training logs train/val loss, token accuracy and greedy val
+ExpRate/@1/@2/SER each epoch, selects `best.pt` on **val ExpRate**, and
+scores the full val and test splits with it at the end. To score a
+checkpoint again afterwards, import `hmer_latex.eval` (there is no CLI for
+it):
+
+```python
+from hmer_latex.data.loaders import test_loader
+from hmer_latex.eval import evaluate, format_metrics, load_for_inference
+
+model, vocab, config = load_for_inference("checkpoints/densenet_small/best.pt", device)
+metrics, samples = evaluate(model, test_loader(config, vocab), vocab, device)
+print(format_metrics(metrics))
+```
+
+Three presets, each overridable field by field:
+
+| preset | for |
+|---|---|
+| `simple_mvp` | the Phase 1a model: SimpleCNN + a 1-layer/1-head decoder. Fast enough to debug the loop on |
+| `densenet_small` | default. DenseNet (growth 16, 8 layers/block) + 3-layer decoder at `d_model=128`. Sized for MPS |
+| `densenet_bttr` | BTTR's own configuration (growth 24, 16 layers/block, `d_model=256`, 8 heads). For CUDA |
+
+```bash
+uv run python -m hmer_latex.train --preset simple_mvp \
+    --set data.train_dir=data/processed/crohme_tiny data.augment=false train.epochs=500
+```
+
+Any `section.field` works, so a run is fully described by its command line.
+
 ## Status
 
-**Phase 0 (data pipeline) is done.** `data/` renders, tokenizes, batches and
-is covered by tests. The models are still stubs (`NotImplementedError`), so
-the project is not yet runnable end to end -- next up is Phase 1a.
+**Runnable end to end.** Data pipeline, both encoders, transformer decoder,
+greedy decode, training loop with per-epoch validation, and ExpRate
+evaluation are implemented and tested. Still to come: BTTR-style
+bidirectional (L2R + R2L) training, beam search, coverage attention,
+attention visualization, and HME100K transfer.
 
 Raw CROHME (2016 + 2023) and HME100K data is already downloaded and
 extracted under `data/raw/` (see `scripts/download_data.py` for sources).
 
-```bash
-uv run python scripts/prepare_data.py   # ~12s
-```
-
-renders `data/processed/crohme_{train,val,test}/` (12024 / 1702 / 3499
-expressions), builds `vocab.json` (138 tokens), and carves a 64-sample
-`crohme_tiny/` slice for the Phase 1a overfit test.
+`prepare_data.py` renders `data/processed/crohme_{train,val,test}/`
+(12024 / 1702 / 3499 expressions), builds `vocab.json` (138 tokens), and
+carves a 64-sample `crohme_tiny/` slice for the overfit test.
 
 Source is CROHME 2023's real ink only: `INKML/train/CROHME2023_train` +
 `INKML/CROHME2019`. The 147k-file `Artificial_data` corpus is deliberately
@@ -79,12 +116,16 @@ excluded for now -- it dwarfs the real ink and is a Phase 2 question.
 
 Notes on choices that aren't obvious from the code:
 
-- **Canvas is 384x128, not square.** 93% of CROHME expressions are wider
-  than tall (median aspect 3.13:1), so a square canvas spends ~68% of its
-  pixels on whitespace. The wide canvas renders symbols 44% taller using
-  25% fewer pixels. It also makes the encoder's 12x4=48-position grid
-  differ from `d_model=64`, so a transposed `memory` is a shape error
-  rather than a silent bug.
+- **One canvas per expression, padded per batch.** Each expression is
+  rendered at its own size -- ink 64px tall, width following the aspect
+  ratio up to a 512 cap -- and `collate_batch` pads each batch to a common
+  size with a mask that keeps the padding out of attention. The earlier
+  approach letterboxed everything into a fixed 384x128 canvas; that
+  distorted nothing (aspect ratio was preserved) but spent ~70% of its
+  pixels on blank space and scaled a 3-symbol expression and a 60-symbol
+  one to wildly different ink sizes. Mean pixels per image: 14.3k against
+  letterbox's 49.2k. Batches of 16 still come out ~52% padding, which
+  width-bucketing the sampler would mostly recover.
 - **Images are pre-rendered to PNG, not rendered on demand.** Parsing is
   0.32 ms/file and rendering 0.19 ms/file, so neither is a bottleneck; the
   reason to materialize is that val/test must be frozen for metrics to be
@@ -110,12 +151,14 @@ infra, augmentation).
    `scripts/prepare_data.py`.
 4. ~~Build vocab from training labels, save to `vocab.json`.~~ Done.
 5. ~~`data/datasets.py::collate_batch`.~~ Done -- returns
-   `(images, tgt_in, tgt_out, tgt_pad_mask)`. Images need no padding (fixed
-   canvas); `tgt_in`/`tgt_out` are the same ids offset by one, which is the
-   teacher-forcing signal. `tgt_pad_mask` is built but **not yet consumed**:
-   `TransformerDecoder.forward` has no padding-mask argument, and
-   `ignore_index=pad_id` in the loss is what keeps the MVP correct. Wire it
-   in as `tgt_key_padding_mask` before any real training run.
+   `(images, img_pad_mask, tgt_in, tgt_out, tgt_pad_mask)`. `tgt_in`/
+   `tgt_out` are the same ids offset by one, which is the teacher-forcing
+   signal. Both masks mark padding with `True` and are consumed as
+   attention key-padding masks: `tgt_pad_mask` keeps padded labels out of
+   self-attention, `img_pad_mask` (downsampled onto the feature grid by
+   `HMERModel.encode`) keeps padded image regions out of cross-attention.
+   `ignore_index=pad_id` in the loss separately keeps padded positions from
+   contributing gradient -- both are needed.
 6. (Later) HME100K prep + synthetic photographic augmentation
    (perspective/lighting/blur) -- the "extend to photographed handwriting"
    part of the proposal, also Claude's.
@@ -130,20 +173,25 @@ with `nhead=1, num_layers=1`, trained L2R only, decoded greedy-only. Get
 this overfitting a tiny slice of CROHME end to end -- that's the signal
 the rest of the pipeline (data, loss, checkpointing, decoding) actually
 works, before scaling up complexity.
-7. `models/encoder.py::SimpleCNNEncoder`.
-8. `models/decoder.py::TransformerDecoder` (MVP params), `PositionalEncoding2D`.
-9. `models/model.py::generate`: greedy decode only.
-10. `train.py`: loop with loss/optimizer/checkpointing, run against the MVP model.
-11. `eval.py`: ExpRate over a checkpoint.
+7. ~~`models/encoder.py::SimpleCNNEncoder`.~~ Done.
+8. ~~`models/decoder.py::TransformerDecoder` (MVP params), `PositionalEncoding2D`.~~ Done.
+9. ~~`models/model.py::generate`: greedy decode only.~~ Done.
+10. ~~`train.py`: loop with loss/optimizer/checkpointing.~~ Done, plus
+    per-epoch validation and ExpRate-based checkpoint selection.
+11. ~~`eval.py`: ExpRate over a checkpoint.~~ Done -- ExpRate, ExpRate@1,
+    ExpRate@2 and symbol error rate, per epoch on val and once on test.
 
 **Phase 1b -- scale up architecture (Chris, by hand)**
 
-Once the MVP loop runs end to end, swap in the real pieces -- these are
-additions on top of the same interfaces, not rewrites.
-12. `models/encoder.py::DenseNetEncoder`: swap in for `SimpleCNNEncoder`.
-13. Bump decoder `nhead`/`num_layers`, add BTTR-style bidirectional
-    (L2R/R2L) training.
+Once the MVP loop runs end to end, swap in the real pieces.
+12. ~~`models/encoder.py::DenseNetEncoder`: swap in for
+    `SimpleCNNEncoder`.~~ Done -- `model.encoder` selects between them.
+13. ~~Bump decoder `nhead`/`num_layers`~~ (done, see presets); add
+    BTTR-style bidirectional (L2R/R2L) training.
 14. `models/model.py::generate`: beam search, L2R/R2L fusion.
+15. ~~Variable-size images: pad and mask rather than fit a fixed
+    canvas.~~ Done -- `img_pad_mask` threaded through the encoder's
+    downsampling into cross-attention.
 
 **Phase 2 -- iteration (joint)**
 15. Full CROHME training run, baseline numbers.

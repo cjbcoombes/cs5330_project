@@ -11,17 +11,24 @@ module, not baked into the base decoder.
 
 MVP target (README Roadmap, Phase 1a): instantiate this same class with
 nhead=1, num_layers=1, train L2R only (single direction, no bidirectional
-fusion), and decode greedy-only in model.py::generate. The class/forward
-signature below should already support that -- bidirectional training and
-beam search are additions on top, not interface changes.
+fusion), and decode greedy-only in model.py::generate.
+
+Bidirectional training and beam search are additions on top of this
+interface. Variable-size *images* were not: padding images to a common
+size within a batch meant `forward` had to grow a
+`memory_key_padding_mask` argument, since padded feature positions must be
+kept out of cross-attention the same way padded target positions are kept
+out of self-attention.
 """
 
 from __future__ import annotations
 
+import math
+
 import torch
 from torch import nn
 
-# Hello?
+
 class PositionalEncoding2D(nn.Module):
     """(B, C, H, W) -> (B, C, H, W)"""
 
@@ -60,8 +67,12 @@ class PositionalEncoding2D(nn.Module):
             return self.pe_cache[key]
 
         C = self.d_model // 2
+        # Absolute positions, *not* divided by L. Images in a batch are padded
+        # to a common H, W (see data/datasets.py::collate_batch), so dividing
+        # by the grid extent would make a given pixel's encoding depend on
+        # whichever other samples happened to land in its batch.
         pe = torch.zeros((C, L), dtype=dtype, device=device)
-        cross_scaled = self.cross_prod[:(C//2), :L] / L
+        cross_scaled = self.cross_prod[:(C//2), :L]
         pe[0::2, :] = torch.sin(cross_scaled)
         pe[1::2, :] = torch.cos(cross_scaled)
 
@@ -89,6 +100,7 @@ class PositionalEncoding2D(nn.Module):
         out = b.permute(0, 2, 1, 3)
 
         return out
+
 
 class PositionalEncoding1D(nn.Module):
     """(B, C, L) -> (B, C, L)"""
@@ -132,12 +144,37 @@ class PositionalEncoding1D(nn.Module):
 
 
 class TransformerDecoder(nn.Module):
-    def __init__(self, vocab_size: int, d_model: int = 256, nhead: int = 8, num_layers: int = 3, max_seq_len: int = 100):
+    def __init__(
+        self,
+        vocab_size: int,
+        d_model: int = 256,
+        nhead: int = 8,
+        num_layers: int = 3,
+        dim_feedforward: int = 1024,
+        dropout: float = 0.3,
+        max_seq_len: int = 256,
+    ):
         super().__init__()
 
         embed = nn.Embedding(num_embeddings=vocab_size, embedding_dim=d_model)
+        # Initialized at std 1/sqrt(d_model) so that the * sqrt(d_model) in
+        # forward() lands back at unit scale. The two go together: PyTorch's
+        # default init is std 1, and scaling *that* by sqrt(d_model) inflates
+        # pre-softmax attention logits by ~d_model, which saturates attention
+        # into near-one-hot at initialization.
+        nn.init.normal_(embed.weight, mean=0.0, std=d_model ** -0.5)
         posenc = PositionalEncoding1D(d_model=d_model, max_len=max_seq_len)
-        layer = nn.TransformerDecoderLayer(d_model=d_model, nhead=nhead, batch_first=True) # has a lot more options too
+        # dim_feedforward and dropout are passed explicitly because PyTorch's
+        # defaults (2048, 0.1) are both wrong for us: 2048 is 8x d_model at
+        # the MVP size, and 0.1 is far too little regularization for 12k
+        # training samples.
+        layer = nn.TransformerDecoderLayer(
+            d_model=d_model,
+            nhead=nhead,
+            dim_feedforward=dim_feedforward,
+            dropout=dropout,
+            batch_first=True,
+        )
 
         # fwd pass is
         #    tgt      = seq so far                  (B, T, D) taken from embedding of (B, T)
@@ -145,7 +182,9 @@ class TransformerDecoder(nn.Module):
         #    tgt_mask = hides future chars in tgt   (T, T)
         # ->
         #    attended = (B, T, D)
-        trans = nn.TransformerDecoder(decoder_layer=layer, num_layers=num_layers)
+        trans = nn.TransformerDecoder(
+            decoder_layer=layer, num_layers=num_layers, norm=nn.LayerNorm(d_model)
+        )
 
         proj = nn.Linear(in_features=d_model, out_features=vocab_size)
 
@@ -156,6 +195,7 @@ class TransformerDecoder(nn.Module):
 
         self.d_model = d_model
         self.vocab_size = vocab_size
+        self.max_seq_len = max_seq_len
 
         mask = torch.triu(
             torch.full((max_seq_len, max_seq_len), True, dtype=torch.bool),
@@ -169,9 +209,14 @@ class TransformerDecoder(nn.Module):
         memory: torch.Tensor,
         target_ids: torch.Tensor,
         target_ids_mask: torch.Tensor,
+        memory_key_padding_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """memory: (B, H'*W', C) flattened encoder features (with pos. enc.)
         target_ids: (B, T) teacher-forced token ids
+        target_ids_mask: (B, T) bool, True on padded target positions
+        memory_key_padding_mask: (B, H'*W') bool, True on padded image
+            positions -- images in a batch are padded to a common size, so
+            without this, cross-attention would attend to blank padding.
         -> logits: (B, T, vocab_size)
         """
         B, L, C = memory.shape
@@ -179,22 +224,31 @@ class TransformerDecoder(nn.Module):
         D = self.d_model
         V = self.vocab_size
 
+        if T > self.max_seq_len:
+            raise ValueError(
+                f"target sequence length {T} exceeds max_seq_len "
+                f"{self.max_seq_len}; the causal mask and positional encoding "
+                f"are only built that large"
+            )
+
         mask = self.mask[:T, :T]
         assert mask.shape == (T, T)
 
-        embed = self.embed(target_ids)
+        # Scaled by sqrt(D) to undo the 1/sqrt(d_model) embedding init above,
+        # which puts token identity at the same amplitude as the positional
+        # encoding that is about to be added to it.
+        embed = self.embed(target_ids) * math.sqrt(D)
         assert embed.shape == (B, T, D)
 
         pos_embed = self.posenc(embed.transpose(1, 2)).transpose(1, 2)
         assert pos_embed.shape == (B, T, D)
-
-        # TODO: multiply by sqrt(D)? why?
 
         trans = self.trans(
             tgt = pos_embed,
             tgt_mask = mask,
             tgt_key_padding_mask = target_ids_mask,
             memory = memory,
+            memory_key_padding_mask = memory_key_padding_mask,
             tgt_is_causal=True
         )
         assert trans.shape == (B, T, D)

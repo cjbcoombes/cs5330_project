@@ -8,11 +8,15 @@ Usage:
 Reads data/raw/crohme/crohme_2023/ (already downloaded by download_data.py)
 and writes data/processed/:
 
-    crohme_train/   labels.tsv + PNGs   12024 real-ink expressions
+    crohme_train/  labels.tsv + PNGs  12024 real-ink expressions
     crohme_val/                          1702
     crohme_test/                         3499
-    crohme_tiny/                           64   slice of train, for overfitting
-    vocab.json                            142 tokens, built from train only
+    crohme_tiny/                           64   slice of train, overfit
+    vocab.json                            142 tokens, from train only
+
+Each expression is rendered at its own size (ink `--target-height` tall,
+width following the aspect ratio up to `--max-width`); collate_batch pads
+each batch to a common size.
 
 Deliberately excluded: INKML/train/Artificial_data (147062 synthetically
 generated files). It dwarfs the real ink, is irrelevant to the MVP, and
@@ -88,10 +92,9 @@ def carve_tiny(train_dir: Path, tiny_dir: Path, n: int) -> int:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--splits", nargs="+", choices=list(SPLITS), default=list(SPLITS))
-    parser.add_argument("--width", type=int, default=384)
-    parser.add_argument("--height", type=int, default=128)
+    parser.add_argument("--target-height", type=int, default=64, help="ink height")
+    parser.add_argument("--max-width", type=int, default=512, help="width cap")
     parser.add_argument("--stroke-width", type=int, default=3)
-    parser.add_argument("--padding", type=int, default=10)
     parser.add_argument("--tiny-size", type=int, default=64)
     args = parser.parse_args()
 
@@ -104,9 +107,9 @@ def main() -> None:
         )
 
     render_kwargs = dict(
-        image_size=(args.width, args.height),
+        target_height=args.target_height,
+        max_width=args.max_width,
         stroke_width=args.stroke_width,
-        padding=args.padding,
     )
 
     counts: dict[str, tuple[int, int]] = {}
@@ -117,20 +120,35 @@ def main() -> None:
     # Vocab from the train split only; val/test unknowns are expected and
     # should map to <unk> rather than inflating the vocab.
     vocab = None
+    vocab_path = PROCESSED_DIR / "vocab.json"
     train_dir = PROCESSED_DIR / "crohme_train"
     if (train_dir / "labels.tsv").exists():
         vocab = Vocab.build_from_labels(read_labels(train_dir))
-        vocab.save(PROCESSED_DIR / "vocab.json")
+        # Token ids are baked into every checkpoint, so a re-render must not
+        # change them -- a reordered vocab silently turns an old checkpoint
+        # into fluent nonsense. Refuse rather than overwrite.
+        if vocab_path.exists():
+            existing = Vocab.load(vocab_path)
+            if existing.itos != vocab.itos:
+                raise SystemExit(
+                    f"{vocab_path} disagrees with the vocab built from "
+                    f"{train_dir} ({len(existing)} vs {len(vocab)} tokens). "
+                    f"Delete it to rebuild, and retrain anything that used it."
+                )
+        else:
+            vocab.save(vocab_path)
 
     n_tiny = 0
     if "train" in args.splits:
         n_tiny = carve_tiny(train_dir, PROCESSED_DIR / "crohme_tiny", args.tiny_size)
 
-    print(f"\n{'=' * 58}\nprepare_data summary  (canvas {args.width}x{args.height})\n{'=' * 58}")
+    canvas = f"ink height {args.target_height}, max width {args.max_width}"
+    print(f"\n{'=' * 58}\nprepare_data summary  ({canvas})\n{'=' * 58}")
     for split, (written, skipped) in counts.items():
-        print(f"  crohme_{split:<6} {written:>6} rendered   {skipped:>4} skipped")
+        name = f"crohme_{split}"
+        print(f"  {name:<20} {written:>6} rendered   {skipped:>4} skipped")
     if n_tiny:
-        print(f"  crohme_tiny   {n_tiny:>6} copied from train")
+        print(f"  {'crohme_tiny':<20} {n_tiny:>6} copied from train")
     if vocab is not None:
         print(f"\n  vocab         {len(vocab):>6} tokens -> {PROCESSED_DIR / 'vocab.json'}")
         for split in args.splits:

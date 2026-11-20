@@ -2,7 +2,6 @@
 
 import numpy as np
 import pytest
-from PIL import Image
 
 from hmer_latex.data.render_inkml import parse_inkml, render_dataset, render_strokes
 
@@ -13,11 +12,6 @@ INKML = """<ink xmlns="http://www.w3.org/2003/InkML">
 <trace id="1">40 5, 45 8</trace>
 </ink>
 """
-
-
-def ink_bbox(image: Image.Image):
-    """(left, top, right, bottom) of non-background pixels, or None."""
-    return Image.eval(image, lambda v: 255 - v).getbbox()
 
 
 @pytest.fixture
@@ -42,32 +36,6 @@ def test_parse_inkml_handles_third_channel(tmp_path):
     path = tmp_path / "t.inkml"
     path.write_text(INKML.replace("10 10, 20 20, 30 10", "10 10 0, 20 20 1, 30 10 2"))
     np.testing.assert_allclose(parse_inkml(path).strokes[0][1], [20.0, 20.0])
-
-
-def test_render_strokes_size_and_mode():
-    image = render_strokes([np.array([[0.0, 0.0], [10.0, 10.0]])], image_size=(384, 128))
-    assert image.size == (384, 128)
-    assert image.mode == "L"
-
-
-def test_render_strokes_respects_padding():
-    """Ink must not touch the canvas edge -- strokes are drawn centered on the
-    path, so a stroke flush to the border loses half its width to clipping."""
-    strokes = [np.array([[0.0, 0.0], [100.0, 50.0]])]
-    image = render_strokes(strokes, image_size=(384, 128), padding=10, stroke_width=1)
-    left, top, right, bottom = ink_bbox(image)
-    assert left >= 9 and top >= 9
-    assert right <= 384 - 9 and bottom <= 128 - 9
-
-
-def test_render_strokes_preserves_aspect_ratio():
-    """A 10:1 stroke must stay 10:1 on canvas, letterboxed, not stretched."""
-    strokes = [np.array([[0.0, 0.0], [100.0, 10.0]])]
-    image = render_strokes(strokes, image_size=(384, 128), padding=10, stroke_width=1)
-    left, top, right, bottom = ink_bbox(image)
-    assert (right - left) / (bottom - top) == pytest.approx(10.0, rel=0.15)
-    # and it should be vertically centred, not pinned to the top
-    assert abs(((top + bottom) / 2) - 64) < 6
 
 
 def test_single_point_stroke_renders_ink():
@@ -101,3 +69,73 @@ def test_render_dataset_skips_unparseable(tmp_path, inkml_file):
     (inkml_file.parent / "broken.inkml").write_text("<ink>not closed")
     written, skipped = render_dataset([inkml_file.parent], tmp_path / "out", show_progress=False)
     assert (written, skipped) == (1, 1)
+
+
+# --- one canvas per expression; padding happens at batch time ---
+
+RENDER = dict(target_height=64, max_width=512, margin=4, min_side=16)
+
+
+def stroke(x0, y0, x1, y1):
+    return [np.array([[float(x0), float(y0)], [float(x1), float(y1)]])]
+
+
+def test_render_returns_a_grayscale_image():
+    image = render_strokes(stroke(0, 0, 100, 50), **RENDER)
+    assert image.mode == "L"
+
+
+def test_render_fits_the_target_height():
+    """An expression whose aspect ratio fits under the width cap fills the
+    height exactly. (Anything wider than max_width/target_height = 8:1 is
+    limited by the width instead -- see the cap test below.)"""
+    image = render_strokes(stroke(0, 0, 300, 60), **RENDER)
+
+    assert image.height == 64
+    assert image.width < 512
+
+
+def test_render_preserves_aspect_ratio():
+    """The whole point of one scale factor across all strokes: a 10:1
+    expression stays 10:1, so superscripts stay above and fractions stay
+    stacked."""
+    ink_w, ink_h = 300, 60
+    image = render_strokes(stroke(0, 0, ink_w, ink_h), **RENDER)
+
+    # back out the ink extent by removing the margin on both sides
+    aspect = (image.width - 8) / (image.height - 8)
+    assert abs(aspect - ink_w / ink_h) < 0.1
+
+
+def test_render_caps_the_width():
+    """A very wide expression is scaled down to fit max_width, which makes
+    it short rather than clipped."""
+    image = render_strokes(stroke(0, 0, 5000, 30), **RENDER)
+
+    assert image.width == 512
+    assert image.height < 64
+
+
+def test_render_survives_degenerate_extents():
+    """`span` is floored at 1e-6, so an expression with no vertical extent
+    (a lone minus sign) or none at all (a single dot) would otherwise scale
+    to a canvas of zero height."""
+    flat = render_strokes(stroke(0, 10, 200, 10), **RENDER)
+    dot = render_strokes([np.array([[5.0, 5.0]])], **RENDER)
+    empty = render_strokes([], **RENDER)
+
+    for image in (flat, dot, empty):
+        assert image.width >= 16 and image.height >= 16
+        assert image.width <= 512 and image.height <= 64
+
+
+def test_render_puts_ink_in_the_top_left():
+    """No centring: padding is added on the right/bottom at batch time, so
+    the ink has to start at `margin` rather than being centred."""
+    image = render_strokes(stroke(0, 0, 200, 40), **RENDER)
+    pixels = np.asarray(image)
+
+    ink_rows = np.where((pixels < 128).any(axis=1))[0]
+    ink_cols = np.where((pixels < 128).any(axis=0))[0]
+    assert ink_rows[0] <= 4 + 2
+    assert ink_cols[0] <= 4 + 2

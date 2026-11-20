@@ -77,39 +77,47 @@ def parse_inkml(path: Path) -> InkExpression:
 
 def render_strokes(
     strokes: list[np.ndarray],
-    image_size: tuple[int, int] = (384, 128),
+    target_height: int = 64,
+    max_width: int = 512,
     stroke_width: int = 3,
-    padding: int = 10,
+    margin: int = 4,
+    min_side: int = 16,
 ) -> Image.Image:
     """Rasterize a list of strokes to a single grayscale image.
-
-    Strokes are normalized to fit within `image_size` (minus `padding`)
-    while preserving aspect ratio, then drawn as connected line segments.
-
-    `image_size` is (width, height) -- PIL's order, not the (H, W) of the
-    resulting tensor. The default 384x128 is wide because 93% of CROHME
-    expressions are wider than tall (median aspect 3.13:1).
 
     One scale factor is computed across *all* strokes together, so relative
     size and position between strokes is preserved -- that spatial relation
     is the entire signal for superscripts, subscripts and fractions.
+
+    The ink is scaled to `target_height` tall and the width follows the
+    aspect ratio, capped at `max_width`. Every image therefore comes out a
+    different size; collate_batch pads each batch to a common one and passes
+    a mask so the model ignores the padding. Expressions wider than
+    `max_width / target_height` (8:1 at the defaults) are width-limited and
+    come out shorter than `target_height`.
     """
-    width, height = image_size
-    image = Image.new("L", image_size, BACKGROUND)
     if not strokes:
-        return image
+        # Blank, and kept small rather than letting an empty expression pad
+        # every batch it lands in out to max_width.
+        return Image.new("L", (min_side, min_side), BACKGROUND)
 
     all_points = np.concatenate(strokes, axis=0)
     lo = all_points.min(axis=0)
     span = np.maximum(all_points.max(axis=0) - lo, 1e-6)
 
-    avail = np.array([width - 2 * padding, height - 2 * padding], dtype=np.float64)
-    scale = float(np.min(avail / span))
+    # Fit the height, then back off if that would overflow max_width.
+    scale = (target_height - 2 * margin) / span[1]
+    scale = min(scale, (max_width - 2 * margin) / span[0])
 
-    # Centre the scaled ink in the canvas; the limiting axis ends up with
-    # exactly `padding` on each side, the other with padding + letterboxing.
-    offset = (np.array([width, height], dtype=np.float64) - span * scale) / 2.0
+    # The clamps are load-bearing, not defensive: `span` is floored at 1e-6,
+    # so an expression with no vertical extent at all (a lone minus sign, a
+    # single dot) would otherwise scale to a canvas of zero height.
+    width = int(np.clip(round(span[0] * scale) + 2 * margin, min_side, max_width))
+    height = int(np.clip(round(span[1] * scale) + 2 * margin, min_side, target_height))
+    # No centring: padding is added on the right/bottom at batch time.
+    offset = np.array([margin, margin], dtype=np.float64)
 
+    image = Image.new("L", (width, height), BACKGROUND)
     draw = ImageDraw.Draw(image)
     radius = stroke_width / 2.0
     for stroke in strokes:
@@ -189,18 +197,17 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--inkml-dirs", type=Path, nargs="+", required=True)
     parser.add_argument("--out-dir", type=Path, required=True)
-    parser.add_argument("--width", type=int, default=384)
-    parser.add_argument("--height", type=int, default=128)
+    parser.add_argument("--target-height", type=int, default=64)
+    parser.add_argument("--max-width", type=int, default=512)
     parser.add_argument("--stroke-width", type=int, default=3)
-    parser.add_argument("--padding", type=int, default=10)
     args = parser.parse_args()
 
     written, skipped = render_dataset(
         args.inkml_dirs,
         args.out_dir,
-        image_size=(args.width, args.height),
+        target_height=args.target_height,
+        max_width=args.max_width,
         stroke_width=args.stroke_width,
-        padding=args.padding,
     )
     print(f"{args.out_dir}: wrote {written}, skipped {skipped}")
 
